@@ -1,103 +1,234 @@
-import Image from "next/image";
+'use client';
+import React, { useState, useEffect, useCallback } from 'react';
+import { HomePage } from '@/components/pages/home-page';
+import { DetailsPage } from '@/components/pages/details-page';
+import { ConfigPage } from '@/components/pages/config-page';
 
-export default function Home() {
-  return (
-    <div className="font-sans grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20">
-      <main className="flex flex-col gap-[32px] row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
+interface MetricData {
+  voltage: string;
+  current: string;
+  power: string;
+  energy: string;
+  efficiency: string;
+  pf: string;
+}
+
+interface MetricStatus {
+  voltage: 'ok' | 'warning';
+  powerFactor: 'ok' | 'warning';
+  power: 'ok' | 'warning';
+}
+
+export default function App() {
+  const [data, setData] = useState<MetricData>({
+    voltage: '0',
+    current: '0',
+    power: '0',
+    energy: '0',
+    efficiency: '0',
+    pf: '0',
+  });
+  const [metricStatus, setMetricStatus] = useState<MetricStatus>({
+    voltage: 'ok',
+    powerFactor: 'ok',
+    power: 'ok',
+  });
+  const [resetStatus, setResetStatus] = useState('');
+  const [isOnline, setIsOnline] = useState(typeof window !== 'undefined' ? navigator.onLine : true);
+  const [currentPage, setCurrentPage] = useState('home');
+  const [selectedMetric, setSelectedMetric] = useState<{ title: string, value: string, unit: string } | null>(null);
+  const [showLowEnergyWarning, setShowLowEnergyWarning] = useState(false);
+  // const [showConfig, setShowConfig] = useState(false);
+  const [showConfig, setShowConfig] = useState(typeof window !== 'undefined' ? !navigator.onLine || !localStorage.getItem('esp32Ip') : true);
+  const [esp32Ip, setEsp32Ip] = useState(typeof window !== 'undefined' ? localStorage.getItem('esp32Ip') || '' : '');
+  const [ssid, setSsid] = useState(typeof window !== 'undefined' ? localStorage.getItem('ssid') || '' : '');
+  const [password, setPassword] = useState(typeof window !== 'undefined' ? localStorage.getItem('password') || '' : '');
+  const [dateRange, setDateRange] = useState('7d');
+
+  const getBaseUrl = () => `http://${esp32Ip}`;
+
+  const registerServiceWorker = () => {
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/service-worker.js').then(registration => {
+          console.log('Service Worker registered with scope:', registration.scope);
+        }).catch(error => {
+          console.log('Service Worker registration failed:', error);
+        });
+      });
+    }
+  };
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      registerServiceWorker();
+      const handleOnlineStatus = () => {
+        const onlineStatus = navigator.onLine;
+        setIsOnline(onlineStatus);
+        if (onlineStatus && !localStorage.getItem('esp32Ip')) {
+          setShowConfig(true);
+        } else if (!onlineStatus) {
+          setShowConfig(false);
+        }
+      };
+      window.addEventListener('online', handleOnlineStatus);
+      window.addEventListener('offline', handleOnlineStatus);
+      return () => {
+        window.removeEventListener('online', handleOnlineStatus);
+        window.removeEventListener('offline', handleOnlineStatus);
+      };
+    }
+  }, []);
+
+  const fetchData = useCallback(async () => {
+    if (!isOnline || !esp32Ip) return;
+    try {
+      const response = await fetch(`${getBaseUrl()}/data`);
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      const jsonData = await response.json();
+      const newPower = parseFloat(jsonData.power).toFixed(1);
+      const newEnergy = (parseFloat(jsonData.energy) * 1000).toFixed(0);
+      const newEfficiency = (parseFloat(newEnergy) > 0 ? (parseFloat(jsonData.power) / parseFloat(newEnergy)) * 100 : 0).toFixed(2);
+      const newPf = parseFloat(jsonData.pf).toFixed(2);
+
+      setData({
+        voltage: parseFloat(jsonData.voltage).toFixed(1),
+        current: parseFloat(jsonData.current).toFixed(2),
+        power: newPower,
+        energy: newEnergy,
+        efficiency: newEfficiency,
+        pf: newPf,
+      });
+
+      // Smart Alerts Logic
+      const lowEnergyThreshold = 50;
+      const lowVoltageThreshold = 190;
+      const highVoltageThreshold = 250;
+      const lowPfThreshold = 0.75;
+      
+      const newMetricStatus: MetricStatus = { voltage: 'ok', powerFactor: 'ok', power: 'ok' };
+      
+      if (parseFloat(newPower) < lowEnergyThreshold && parseFloat(newPower) > 0) {
+        newMetricStatus.power = 'warning';
+      }
+      
+      if (parseFloat(jsonData.voltage) < lowVoltageThreshold || parseFloat(jsonData.voltage) > highVoltageThreshold) {
+        newMetricStatus.voltage = 'warning';
+      }
+      
+      if (parseFloat(newPf) < lowPfThreshold) {
+        newMetricStatus.powerFactor = 'warning';
+      }
+      
+      setMetricStatus(newMetricStatus);
+      setShowLowEnergyWarning(newMetricStatus.power === 'warning');
+
+    } catch (error) {
+      console.error("Could not fetch data:", error);
+      setShowLowEnergyWarning(true);
+      setMetricStatus({ voltage: 'warning', powerFactor: 'warning', power: 'warning' });
+    }
+  }, [isOnline, esp32Ip]);
+
+  useEffect(() => {
+    fetchData();
+    const interval = setInterval(fetchData, 2000);
+    return () => clearInterval(interval);
+  }, [fetchData]);
+
+  const handleResetEnergy = async () => {
+    setResetStatus('Resetting...');
+    try {
+      const response = await fetch(`${getBaseUrl()}/reset`);
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      const text = await response.text();
+      setResetStatus(text);
+    } catch (error) {
+      setResetStatus('Failed to reset. Check connection.');
+      console.error("Error resetting energy:", error);
+    } finally {
+      setTimeout(() => setResetStatus(''), 3000);
+    }
+  };
+
+  const handleCardClick = (metric: { title: string, value: string, unit: string }) => {
+    setSelectedMetric(metric);
+    setCurrentPage('details');
+  };
+
+  const handleSaveConfig = () => {
+    localStorage.setItem('esp32Ip', esp32Ip);
+    localStorage.setItem('ssid', ssid);
+    localStorage.setItem('password', password);
+    setShowConfig(false);
+  };
+
+  const renderCurrentPage = () => {
+    if (showConfig) {
+      return (
+        <ConfigPage
+          esp32Ip={esp32Ip}
+          setEsp32Ip={setEsp32Ip}
+          ssid={ssid}
+          setSsid={setSsid}
+          password={password}
+          setPassword={setPassword}
+          onSave={handleSaveConfig}
         />
-        <ol className="font-mono list-inside list-decimal text-sm/6 text-center sm:text-left">
-          <li className="mb-2 tracking-[-.01em]">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] font-mono font-semibold px-1 py-0.5 rounded">
-              src/app/page.tsx
-            </code>
-            .
-          </li>
-          <li className="tracking-[-.01em]">
-            Save and see your changes instantly.
-          </li>
-        </ol>
-
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:w-auto"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
+      );
+    }
+    switch (currentPage) {
+      case 'home':
+        return (
+          <HomePage
+            data={data}
+            metricStatus={metricStatus}
+            onCardClick={handleCardClick}
+            onResetEnergy={handleResetEnergy}
+            resetStatus={resetStatus}
+          />
+        );
+      case 'details':
+        if (selectedMetric) {
+          return (
+            <DetailsPage
+              metric={selectedMetric}
+              onBack={() => setCurrentPage('home')}
+              dateRange={dateRange}
+              setDateRange={setDateRange}
             />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 w-full sm:w-auto md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
+          );
+        }
+        return null;
+      default:
+        return null;
+    }
+  };
+
+  return (
+    <div className="bg-slate-950 min-h-screen text-white p-4 font-sans">
+      <div className="container mx-auto max-w-4xl py-8">
+        <div className="cursor-pointer" onClick={() => setCurrentPage('home')}>
+          <h1 className="text-3xl sm:text-4xl md:text-5xl font-bold text-center mb-8 text-blue-400">
+            Renewable Energy Monitor
+          </h1>
         </div>
-      </main>
-      <footer className="row-start-3 flex gap-[24px] flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
+        {showLowEnergyWarning && (
+          <div className="bg-red-600 text-white p-3 rounded-lg text-center mb-6 font-medium animate-pulse">
+            WARNING: Low energy input detected! Check the microgrid for inefficiencies.
+          </div>
+        )}
+        {!isOnline && (
+          <div className="bg-yellow-500 text-yellow-900 p-3 rounded-lg text-center mb-6 font-medium">
+            You are currently offline. Displaying cached data.
+          </div>
+        )}
+        {renderCurrentPage()}
+      </div>
     </div>
   );
 }
